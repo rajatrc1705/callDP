@@ -12,6 +12,7 @@ public struct FramingControllerConfiguration: Sendable, Codable, Hashable {
     public var fastMotionZoomOutBoost: Double
     public var edgePadding: Double
     public var manualPanStep: Double
+    public var manualPanHeadroomCropSize: Double
     public var manualZoomStep: Double
     public var sizeLerpRate: Double
 
@@ -27,6 +28,7 @@ public struct FramingControllerConfiguration: Sendable, Codable, Hashable {
         fastMotionZoomOutBoost: Double = 0.2,
         edgePadding: Double = 0.05,
         manualPanStep: Double = 0.08,
+        manualPanHeadroomCropSize: Double = 0.82,
         manualZoomStep: Double = 0.1,
         sizeLerpRate: Double = 2.5
     ) {
@@ -41,6 +43,7 @@ public struct FramingControllerConfiguration: Sendable, Codable, Hashable {
         self.fastMotionZoomOutBoost = fastMotionZoomOutBoost
         self.edgePadding = edgePadding
         self.manualPanStep = manualPanStep
+        self.manualPanHeadroomCropSize = manualPanHeadroomCropSize
         self.manualZoomStep = manualZoomStep
         self.sizeLerpRate = sizeLerpRate
     }

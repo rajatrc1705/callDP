@@ -15,6 +15,7 @@ public struct FramingController: Sendable {
         switch command.intent {
         case .moveFrame:
             guard let direction = command.direction else { return }
+            crop.size = sizeWithManualPanHeadroom(crop.size)
             let delta = configuration.manualPanStep * max(0.25, command.amount)
             switch direction {
             case .left:
@@ -73,8 +74,8 @@ public struct FramingController: Sendable {
             desiredCenter = predictedTargetCenter + offset
             desiredSize = targetSize
         } else {
-            desiredCenter = Vector2D(x: 0.5, y: 0.5)
-            desiredSize = Vector2D(x: configuration.maxCropSize, y: configuration.maxCropSize)
+            desiredCenter = crop.center
+            desiredSize = crop.size
         }
 
         let stabilizedCenter = isInsideDeadZone(target: desiredCenter, crop: crop)
@@ -166,5 +167,16 @@ public struct FramingController: Sendable {
         let scaled = max(size.x, size.y) * multiplier
         let clamped = scaled.clamped(to: configuration.minCropSize ... configuration.maxCropSize)
         return Vector2D(x: clamped, y: clamped)
+    }
+
+    private func sizeWithManualPanHeadroom(_ size: Vector2D) -> Vector2D {
+        let currentSize = max(size.x, size.y)
+        guard currentSize >= configuration.maxCropSize - 0.001 else {
+            return size
+        }
+
+        let headroomSize = configuration.manualPanHeadroomCropSize
+            .clamped(to: configuration.minCropSize ... configuration.maxCropSize)
+        return Vector2D(x: headroomSize, y: headroomSize)
     }
 }

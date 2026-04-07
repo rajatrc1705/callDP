@@ -52,4 +52,38 @@ struct FramingControllerTests {
         #expect(next.size.x < crop.size.x)
         #expect(next.zoom > crop.zoom)
     }
+
+    @Test
+    func manualPanCreatesHeadroomWhenCropIsFullFrame() {
+        var controller = FramingController()
+        var crop = CropState(center: Vector2D(x: 0.5, y: 0.5), size: Vector2D(x: 1, y: 1), timestamp: 0)
+
+        controller.apply(
+            command: .pan(.left, source: .keyboard),
+            to: &crop,
+            now: 1.0
+        )
+
+        #expect(crop.size.x < 1.0)
+        #expect(crop.center.x < 0.5)
+        #expect(crop.zoom > 1.0)
+    }
+
+    @Test
+    func manualFramingPersistsWhileTrackerIsIdle() {
+        let controller = FramingController()
+        let crop = CropState(
+            center: Vector2D(x: 0.42, y: 0.5),
+            size: Vector2D(x: 0.82, y: 0.82),
+            zoom: 1 / 0.82,
+            velocity: .zero,
+            timestamp: 1.0
+        )
+        let tracker = TrackerState(mode: .idle)
+
+        let next = controller.update(crop: crop, tracker: tracker, now: 1.0 + (1.0 / 30.0))
+
+        #expect(abs(next.center.x - crop.center.x) < 0.001)
+        #expect(abs(next.size.x - crop.size.x) < 0.001)
+    }
 }
