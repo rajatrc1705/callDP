@@ -12,18 +12,20 @@ let package = Package(
             name: "CallDPCore",
             targets: ["CallDPCore"]
         ),
-        .executable(
-            name: "CallDPApp",
-            targets: ["CallDPApp"]
+        .library(
+            name: "CallDPUI",
+            targets: ["CallDPUI"]
         ),
     ],
     targets: [
         .target(
             name: "CallDPCore"
         ),
-        .executableTarget(
-            name: "CallDPApp",
+        .target(
+            name: "CallDPUI",
             dependencies: ["CallDPCore"]
+            ,
+            path: "Sources/CallDPApp"
         ),
         .testTarget(
             name: "CallDPCoreTests",

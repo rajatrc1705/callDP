@@ -1,22 +1,29 @@
 import AppKit
+#if SWIFT_PACKAGE
 import CallDPCore
+#endif
 import Combine
 import Foundation
 
 @MainActor
-final class DirectorViewModel: ObservableObject {
+final class CameraAgentViewModel: ObservableObject {
     @Published var backendMode: BackendMode
     @Published private(set) var sessionState = DirectorSessionState()
     @Published private(set) var processedImage: NSImage?
     @Published private(set) var latestTranscript = ""
+    @Published private(set) var latestTranscriptIsFinal = true
     @Published private(set) var lastCommandSummary = "No commands yet"
     @Published private(set) var recentLogs: [String] = []
     @Published private(set) var lastDetections: [DetectionCandidate] = []
     @Published private(set) var sourceFrameSize: CGSize = .zero
+    @Published private(set) var remoteSessionState = RemoteSessionState()
+    @Published private(set) var audioInputState: AudioInputState = .stopped
+    @Published private(set) var groundingStatusSummary = "Synthetic detections"
 
     let cameraCapture: CameraCaptureService
     let simulation: SimulationController
 
+    private let remoteTransport: any RemoteCommandTransport
     private var environment: AppEnvironment
     private var stateMachine = DirectorStateMachine()
     private var framingController = FramingController()
@@ -25,18 +32,25 @@ final class DirectorViewModel: ObservableObject {
     private var latestFrame: CameraFrame?
     private var processingDetection = false
     private var processingTracking = false
+    private var cancellables: Set<AnyCancellable> = []
+    private var hasStarted = false
 
     init(
+        remoteTransport: any RemoteCommandTransport,
         cameraCapture: CameraCaptureService = CameraCaptureService(),
         simulation: SimulationController = SimulationController(),
         backendMode: BackendMode = .simulated
     ) {
+        self.remoteTransport = remoteTransport
         self.cameraCapture = cameraCapture
         self.simulation = simulation
         self.backendMode = backendMode
-        self.environment = AppEnvironment.make(mode: backendMode, simulation: simulation)
+        environment = AppEnvironment.make(mode: backendMode, simulation: simulation)
+        remoteSessionState = remoteTransport.currentSessionState
+        groundingStatusSummary = groundingSummary(for: backendMode)
 
         bindEnvironment()
+        bindTransport()
 
         cameraCapture.onFrame = { [weak self] frame in
             self?.handle(frame: frame)
@@ -44,15 +58,24 @@ final class DirectorViewModel: ObservableObject {
     }
 
     func start() {
+        guard hasStarted == false else { return }
+        hasStarted = true
+
+        remoteTransport.register(role: .cameraAgent, name: "Camera Agent")
         cameraCapture.start()
+        publishSnapshot()
 
         Task {
-            try? await environment.audioTranscriber.start()
+            await startAudioTranscriber()
         }
     }
 
     func stop() {
+        guard hasStarted else { return }
+        hasStarted = false
+
         cameraCapture.stop()
+        remoteTransport.disconnect(role: .cameraAgent)
 
         Task {
             await environment.audioTranscriber.stop()
@@ -60,12 +83,45 @@ final class DirectorViewModel: ObservableObject {
         }
     }
 
+    func acceptRemoteControl() {
+        remoteTransport.acceptControl()
+        appendLog("remote control accepted")
+    }
+
+    func pauseRemoteControl() {
+        remoteTransport.pauseControl()
+        appendLog("remote control paused")
+    }
+
+    func resumeRemoteControl() {
+        remoteTransport.resumeControl()
+        appendLog("remote control resumed")
+    }
+
+    func disconnectRemoteControl() {
+        remoteTransport.endSession(for: .cameraAgent)
+        appendLog("director disconnected")
+    }
+
     func setBackendMode(_ mode: BackendMode) {
         guard backendMode != mode else { return }
-        backendMode = mode
-        environment = AppEnvironment.make(mode: mode, simulation: simulation)
-        bindEnvironment()
-        appendLog("backend -> \(mode.title)")
+
+        Task { @MainActor in
+            await environment.audioTranscriber.stop()
+            await environment.trackingEngine.stopTracking()
+
+            backendMode = mode
+            environment = AppEnvironment.make(mode: mode, simulation: simulation)
+            resetPerceptionState()
+            bindEnvironment()
+            appendLog("backend -> \(mode.title)")
+
+            if hasStarted {
+                await startAudioTranscriber()
+            }
+
+            publishSnapshot()
+        }
     }
 
     func submitTranscript(_ text: String) {
@@ -89,6 +145,18 @@ final class DirectorViewModel: ObservableObject {
         apply(command: command, timestamp: latestFrame?.timestamp ?? Date().timeIntervalSince1970)
     }
 
+    func startSpeechListening() {
+        Task {
+            await startAudioTranscriber()
+        }
+    }
+
+    func stopSpeechListening() {
+        Task {
+            await environment.audioTranscriber.stop()
+        }
+    }
+
     private func bindEnvironment() {
         environment.audioTranscriber.onTranscript = { [weak self] segment in
             guard let self else { return }
@@ -96,10 +164,46 @@ final class DirectorViewModel: ObservableObject {
                 await self.consumeTranscript(segment)
             }
         }
+
+        environment.audioTranscriber.onStateChange = { [weak self] state in
+            guard let self else { return }
+            Task { @MainActor in
+                self.audioInputState = state
+            }
+        }
+    }
+
+    private func bindTransport() {
+        cancellables.removeAll()
+
+        remoteTransport.sessionStatePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                guard let self else { return }
+                let previous = remoteSessionState.status
+                remoteSessionState = state
+
+                if previous != state.status {
+                    appendLog("session -> \(state.status.rawValue)")
+                }
+            }
+            .store(in: &cancellables)
+
+        remoteTransport.incomingCommandPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] command in
+                guard let self else { return }
+                apply(command: command, timestamp: latestFrame?.timestamp ?? Date().timeIntervalSince1970)
+            }
+            .store(in: &cancellables)
     }
 
     private func consumeTranscript(_ segment: TranscriptSegment) async {
         latestTranscript = segment.text
+        latestTranscriptIsFinal = segment.isFinal
+        publishSnapshot()
+
+        guard segment.isFinal else { return }
 
         guard let command = try? await environment.commandParser.parse(transcript: segment) else {
             appendLog("unparsed transcript: \(segment.text)")
@@ -128,6 +232,8 @@ final class DirectorViewModel: ObservableObject {
         case .idle, .lostTarget:
             break
         }
+
+        publishSnapshot()
     }
 
     private func requestDetection(for frame: CameraFrame) {
@@ -143,16 +249,27 @@ final class DirectorViewModel: ObservableObject {
                 targetDescription: description,
                 candidateQueries: sessionState.tracker.candidateQueries
             )
+            groundingStatusSummary = "Detecting \(description)"
 
-            let detections = (try? await environment.groundingEngine.detect(in: frame, request: request)) ?? []
-            let transitions = stateMachine.applyDetections(detections, to: &sessionState, now: frame.timestamp)
-            lastDetections = sessionState.candidateDetections
-            emit(transitions)
+            do {
+                let detections = try await environment.groundingEngine.detect(in: frame, request: request)
+                let transitions = stateMachine.applyDetections(detections, to: &sessionState, now: frame.timestamp)
+                lastDetections = sessionState.candidateDetections
+                groundingStatusSummary = detections.isEmpty
+                    ? "No matches for \(description)"
+                    : "Found \(detections.count) candidate\(detections.count == 1 ? "" : "s")"
+                emit(transitions)
 
-            if sessionState.tracker.mode == .tracking, let locked = sessionState.candidateDetections.first {
-                await environment.trackingEngine.beginTracking(target: locked, in: frame)
-                appendLog("locked target: \(locked.label) @ \(String(format: "%.2f", locked.confidence))")
+                if sessionState.tracker.mode == .tracking, let locked = sessionState.candidateDetections.first {
+                    await environment.trackingEngine.beginTracking(target: locked, in: frame)
+                    appendLog("locked target: \(locked.label) @ \(String(format: "%.2f", locked.confidence))")
+                }
+            } catch {
+                groundingStatusSummary = "Error: \(error.localizedDescription)"
+                appendLog("grounding error -> \(error.localizedDescription)")
             }
+
+            publishSnapshot()
         }
     }
 
@@ -171,6 +288,8 @@ final class DirectorViewModel: ObservableObject {
             if let observation {
                 appendLog("tracking \(String(format: "%.2f", observation.confidence))")
             }
+
+            publishSnapshot()
         }
     }
 
@@ -200,6 +319,7 @@ final class DirectorViewModel: ObservableObject {
         lastCommandSummary = describe(command)
         lastDetections = sessionState.candidateDetections
         emit(transitions)
+        publishSnapshot()
     }
 
     private func emit(_ transitions: [DirectorTransition]) {
@@ -208,9 +328,61 @@ final class DirectorViewModel: ObservableObject {
         }
     }
 
+    private func startAudioTranscriber() async {
+        do {
+            try await environment.audioTranscriber.start()
+            appendLog("audio -> listening")
+        } catch {
+            audioInputState = .error(error.localizedDescription)
+            appendLog("audio error -> \(error.localizedDescription)")
+        }
+    }
+
+    private func resetPerceptionState() {
+        sessionState.tracker = TrackerState()
+        sessionState.candidateDetections = []
+        lastDetections = []
+        latestTranscript = ""
+        latestTranscriptIsFinal = true
+        lastCommandSummary = "No commands yet"
+        audioInputState = .stopped
+        groundingStatusSummary = groundingSummary(for: backendMode)
+    }
+
     private func appendLog(_ line: String) {
         recentLogs.insert(line, at: 0)
         recentLogs = Array(recentLogs.prefix(8))
+        publishSnapshot()
+    }
+
+    private func groundingSummary(for mode: BackendMode) -> String {
+        switch mode {
+        case .mock:
+            return "Stub grounding"
+        case .simulated:
+            return "Synthetic detections"
+        case .apple:
+            return "Synthetic detections"
+        case .grounded:
+            return "Model worker idle"
+        }
+    }
+
+    private func publishSnapshot() {
+        remoteTransport.publishAgentSnapshot(
+            RemoteAgentSnapshot(
+                sessionState: sessionState,
+                latestTranscript: latestTranscript,
+                lastCommandSummary: lastCommandSummary,
+                groundingStatusSummary: groundingStatusSummary,
+                recentLogs: recentLogs,
+                sourceFrameSize: VideoFrameSize(
+                    width: Int(sourceFrameSize.width),
+                    height: Int(sourceFrameSize.height)
+                ),
+                backendLabel: backendMode.title
+            )
+        )
     }
 
     private func describe(_ command: DirectorCommand) -> String {

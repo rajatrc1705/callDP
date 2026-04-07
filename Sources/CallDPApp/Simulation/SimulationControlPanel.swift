@@ -1,14 +1,20 @@
+#if SWIFT_PACKAGE
 import CallDPCore
+#endif
 import SwiftUI
 
 struct SimulationControlPanel: View {
-    @ObservedObject var viewModel: DirectorViewModel
+    @ObservedObject var viewModel: CameraAgentViewModel
     @ObservedObject var simulation: SimulationController
     @State private var transcriptInput = "focus on the cooking vessel"
 
     var body: some View {
-        GroupBox("Simulation") {
+        GroupBox(panelTitle) {
             VStack(alignment: .leading, spacing: 14) {
+                Text(panelSubtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 HStack {
                     TextField("Transcript", text: $transcriptInput)
                     Button("Send") {
@@ -53,6 +59,28 @@ struct SimulationControlPanel: View {
                 sliderRow(title: "Horizontal Amp", value: $simulation.horizontalAmplitude, range: 0 ... 0.3)
                 sliderRow(title: "Vertical Amp", value: $simulation.verticalAmplitude, range: 0 ... 0.2)
             }
+        }
+    }
+
+    private var panelTitle: String {
+        switch viewModel.backendMode {
+        case .mock, .simulated:
+            return "Simulation"
+        case .apple, .grounded:
+            return "Manual Commands & Target Injection"
+        }
+    }
+
+    private var panelSubtitle: String {
+        switch viewModel.backendMode {
+        case .mock:
+            return "Inject transcripts and synthetic detections into the fully stubbed backend."
+        case .simulated:
+            return "Inject transcripts and synthetic detections into the simulated grounding and tracking pipeline."
+        case .apple:
+            return "Speech uses Apple recognition and tracking uses Vision. Synthetic detections still seed target lock until the grounding model is replaced."
+        case .grounded:
+            return "Speech uses Apple recognition, tracking uses Vision, and focus-on commands use the local Python grounding worker. Synthetic target injection remains available for debugging."
         }
     }
 

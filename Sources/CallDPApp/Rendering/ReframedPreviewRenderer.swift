@@ -1,5 +1,7 @@
 import AppKit
+#if SWIFT_PACKAGE
 import CallDPCore
+#endif
 import CoreImage
 import Foundation
 

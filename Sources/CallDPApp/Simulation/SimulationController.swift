@@ -1,4 +1,6 @@
+#if SWIFT_PACKAGE
 import CallDPCore
+#endif
 import Combine
 import Foundation
 
